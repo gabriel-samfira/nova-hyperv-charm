@@ -1,9 +1,34 @@
-$utilsModulePath = Join-Path `
-                (Split-Path $SCRIPT:MyInvocation.MyCommand.Path -Parent) `
-                "utils.psm1"
+$utilsModulePath = Join-Path $PSScriptRoot "utils.psm1"
 Import-Module -Force -DisableNameChecking $utilsModulePath
+$jujuModulePath = Join-Path $PSScriptRoot "juju.psm1"
+Import-Module -Force -DisableNameChecking $jujuModulePath
 
-function Start-Process-Redirect {
+function Import-Certificate()
+{
+    [CmdletBinding()]
+    param (
+        [parameter(Mandatory=$true,ValueFromPipeline=$true)]
+        [string]$CertificatePath,
+
+        [parameter(Mandatory=$true)]
+        [System.Security.Cryptography.X509Certificates.StoreLocation]$StoreLocation,
+
+        [parameter(Mandatory=$true)]
+        [System.Security.Cryptography.X509Certificates.StoreName]$StoreName
+    )
+    PROCESS
+    {
+        $store = New-Object System.Security.Cryptography.X509Certificates.X509Store(
+            $StoreName, $StoreLocation)
+        $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+
+        $cert = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2(
+            $CertificatePath)
+        $store.Add($cert)
+    }
+}
+
+function Start-ProcessRedirect {
     param(
         [Parameter(Mandatory=$true)]
         [array]$Filename,
@@ -37,104 +62,13 @@ function Start-Process-Redirect {
 
     $stdout = $p.StandardOutput.ReadToEnd()
     $stderr = $p.StandardError.ReadToEnd()
-    juju-log.exe "stdout: $stdout"
-    juju-log.exe "stderr: $stderr"
+    Write-JujuLog "stdout: $stdout"
+    Write-JujuLog "stderr: $stderr"
 
     return $p
 }
 
-function Get-FeatureAvailable {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$FeatureName
-    )
-
-    $isAvailable = ((Get-WindowsFeature -Name $FeatureName).InstallState `
-                   -eq "Available")
-
-    return $isAvailable
-}
-
-function Get-FeatureInstall {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$FeatureName
-    )
-
-    $installState = (Get-WindowsFeature -Name $FeatureName).InstallState
-
-    $isInstall = ($installState -eq "Installed") `
-                 -or ($installState -eq "InstallPending" )
-
-    return $isInstall
-}
-
-function Install-WindowsFeatures {
-     param(
-        [Parameter(Mandatory=$true)]
-        [array]$Features
-    )
-
-    $installedFeatures = 0
-    $rebootNeeded = $false
-    foreach ($feature in $Features) {
-        $isAvailable = Get-FeatureAvailable $feature
-        if ($isAvailable -eq $true) {
-            $res = Install-WindowsFeature -Name $feature
-            if ($res.RestartNeeded -eq 'Yes') {
-                $rebootNeeded = $true
-            }
-        }
-        $isInstall = Get-FeatureInstall $feature
-        if ($isInstall -eq $true) {
-            $installedFeatures = $installedFeatures + 1
-        } else {
-            juju-log.exe "Install failed for feature $feature"
-        }
-    }
-
-    return @{"InstalledFeatures" = $installedFeatures;
-             "Reboot" = $rebootNeeded }
-}
-
-function install_windows_features {
-     param(
-        [Parameter(Mandatory=$true)]
-        [array]$Features
-    )
-
-    $res = Install-WindowsFeatures $Features
-
-    return $res.InstalledFeatures
-}
-
-function get_available_windows_features {
-     param(
-        [Parameter(Mandatory=$true)]
-        [array]$Features
-    )
-
-    $available = 0
-    foreach ($feature in $Features) {
-        $state = (Get-WindowsFeature -Name $feature).InstallState
-        if (($state -eq 'Available') -or ($state -eq 'InstallPending')) {
-            $available = $available + 1
-        }
-    }
-
-    return $available
-}
-
-function Install-Windows-Features {
-     param(
-        [Parameter(Mandatory=$true)]
-        [array]$Features
-    )
-
-    return (install_windows_features $Features)
-}
-
-function Is-Component-Installed {
+function Is-ComponentInstalled {
     param(
         [Parameter(Mandatory=$true)]
         [string]$Name
@@ -146,255 +80,43 @@ function Is-Component-Installed {
     return ($component -ne $null)
 }
 
-function Set-Dns {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$Interface,
-        [Parameter(Mandatory=$true)]
-        [array]$DnsIps
-    )
-
-    Set-DnsClientServerAddress `
-        -InterfaceAlias $Interface -ServerAddresses $DnsIps
-}
-
-function Is-In-Domain {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$WantedDomain
-    )
-
-    $currentDomain = (Get-WmiObject -Class `
-                          Win32_ComputerSystem).Domain.ToLower()
-    $comparedDomain = ($WantedDomain).ToLower()
-    $inDomain = $currentDomain.Equals($comparedDomain)
-
-    return $inDomain
-}
-
-function Get-NetAdapterName {
-    param()
-
-    return (Get-NetAdapter).Name
-}
-
-function Get-Default-Ethernet-Network-Name {
-    param(
-        [Parameter(Mandatory=$false)]
-        [string]$Second="Primary"
-    )
-
-    $name1 = "Management0"
-    $name2 = "Ethernet0"
-    $found = $false
-
-    try {
-        if ($Second -eq "Primary") {
-            $interface = Get-NetAdapter `
-                         | Where-Object { $_.Name -match $name1 `
-                                        -or $_.Name -match $name2 } `
-                         | Select-Object -First 1
-        } else {
-            $interface = Get-NetAdapter `
-                         | Where-Object { $_.Name -notmatch $name1 `
-                                        -and $_.Name -notmatch $name2 } `
-                         | Select-Object -First 1
-        }
-        if ($interface -ne $null) {
-            $found = $true
-            $name = $interface.Name
-        }
-    } catch {
-        $found = $false
-    }
-
-    if ($found -ne $true){
-        $name = Get-NetAdapterName
-    }
-
-    return $name
-}
-
-function Get-Ethernet-Network-Name {
-    param()
-
-    $name = Get-Default-Ethernet-Network-Name "Primary"
-
-    return $name
-}
-
-function Get-Second-Ethernet-Network-Name {
-    param()
-
-    $name = Get-Default-Ethernet-Network-Name "Second"
-
-    return $name
-}
-
-function Create-Local-Admin {
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$LocalAdminUsername,
-        [Parameter(Mandatory=$true)]
-        [string]$LocalAdminPassword
-    )
-
-    $existentUser = Get-WmiObject -Class Win32_Account `
-                        -Filter "Name = '$LocalAdminUsername'" 
-    if ($existentUser -eq $null) {
-        $computer = [ADSI]"WinNT://$env:computername"
-        $localAdmin = $computer.Create("User", $LocalAdminUsername)
-        $localAdmin.SetPassword($LocalAdminPassword)
-        $localAdmin.SetInfo()
-        $LocalAdmin.FullName = $LocalAdminUsername
-        $LocalAdmin.SetInfo()
-        $LocalAdmin.UserFlags = 1 + 512 + 65536 #logon script|normal user|no pass expiration
-        $LocalAdmin.SetInfo()
+function Rename-Hostname {
+    $jujuUnitName = ${env:JUJU_UNIT_NAME}.split('/')
+    if ($jujuUnitName[0].Length -ge 15) {
+        $jujuName = $jujuUnitName[0].substring(0, 12)
     } else {
-        net.exe user $LocalAdminUsername $LocalAdminPassword
-    }
-    if ((net localgroup administrators `
-       | Where-Object { $_ -Match $LocalAdminUsername }).Length -eq 0) {
-        ([ADSI]"WinNT://$env:computername/Administrators,group").Add("WinNT://$env:computername/$LocalAdminUsername")
-    }
-}
-
-function Get-Domain-Name{
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$FullDomainName
-    )
-
-    $domainNameParts = $FullDomainName.split(".")
-    $domainNamePartsPosition = $domainNameParts.Length - 2
-    $domainName = [System.String]::Join(".", $domainNameParts[0..$domainNamePartsPosition])
-
-    return $domainName
-}
-
-function Get-Ad-Credential{
-    param(
-        [Parameter(Mandatory=$true)]
-        $params
-    )
-
-    $adminusername = $params["ad_username"]
-    $adminpassword = $params["ad_password"]
-    $domain = Get-Domain-Name $params["ad_domain"]
-    $passwordSecure = $adminpassword | ConvertTo-SecureString -asPlainText -Force
-    $adCredential = New-Object System.Management.Automation.PSCredential("$domain\$adminusername", $passwordSecure)
-
-    return $adCredential
-}
-
-function Join-Any-Domain{
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$domain,
-        [Parameter(Mandatory=$true)]
-        [string]$domainCtrlIp,
-        [Parameter(Mandatory=$true)]
-        $localCredential,
-        [Parameter(Mandatory=$true)]
-        $adCredential
-    )
-
-    $networkName = (Get-Ethernet-Network-Name)
-    Set-Dns $networkName $domainCtrlIp
-    $domain = Get-Domain-Name $domain
-    Add-Computer -LocalCredential $localCredential -Credential $adCredential -Domain $domain
-}
-
-function Get-CharmStateKeyPath {
-    param()
-
-    return "HKLM:\SOFTWARE\Wow6432Node\Cloudbase Solutions"
-}
-
-function Set-CharmState{
-    param (
-        [Parameter(Mandatory=$true)]
-        [string]$charmName,
-        [Parameter(Mandatory=$true)]
-        [string]$key,
-        [Parameter(Mandatory=$true)]
-        [string]$val
-        )
-
-    $keyPath = Get-CharmStateKeyPath
-    $fullKey = ($charmName + $key)
-    $property = New-ItemProperty $keyPath -Name $fullKey -Value $val -PropertyType String -ErrorAction SilentlyContinue
-
-    if ($property -eq $null) {        
-        Set-ItemProperty $keyPath -Name $fullKey -Value $val
-    }
-}
-
-function Get-CharmState{
-    param (
-        [Parameter(Mandatory=$true)]
-        [string]$charmName,
-        [Parameter(Mandatory=$true)]
-        [string]$key
-        )
-
-    $keyPath = Get-CharmStateKeyPath
-    $fullKey = ($charmName + $key)
-    $property = Get-ItemProperty $keyPath -Name $fullKey -ErrorAction SilentlyContinue
-
-    if ($property -ne $null) {
-        return $property | Select -ExpandProperty $fullKey
-    } else {
-        return $property
-    }
-}
-
-
-function Rename-Hostname{
-    $jujuUnitName=${env:JUJU_UNIT_NAME}.split('/')
-    if ($jujuUnitName[0].Length -ge 15 ){
-        $jujuName = $jujuUnitName[0].substring(0,12)
-    }else{
         $jujuName = $jujuUnitName[0]
     }
     $newHostname = $jujuName + $jujuUnitName[1]
 
-    if ($env:computername -ne $newHostname){
+    if ($env:computername -ne $newHostname) {
         Rename-Computer -NewName $newHostname
-        exit $env:JUJU_MUST_REBOOT
+        ExitFrom-JujuHook -WithReboot
     }
 }
 
-function Juju-Log{
-    param (
+function Create-ADUsers {
+    param(
         [Parameter(Mandatory=$true)]
-        $args
-        )
-    juju-log.exe $args
-}
+        $UsersToAdd,
+        [Parameter(Mandatory=$true)]
+        [string]$AdminUsername,
+        [Parameter(Mandatory=$true)]
+        $AdminPassword,
+        [Parameter(Mandatory=$true)]
+        [string]$Domain,
+        [Parameter(Mandatory=$true)]
+        [string]$DCName,
+        [Parameter(Mandatory=$true)]
+        [string]$MachineName
+    )
 
-function Create-AD-Users{
-    param (
-        [Parameter(Mandatory=$true)]
-        $usersToAdd,
-        [Parameter(Mandatory=$true)]
-        [string]$adminusername,
-        [Parameter(Mandatory=$true)]
-        $adminpassword,
-        [Parameter(Mandatory=$true)]
-        [string]$domain,
-        [Parameter(Mandatory=$true)]
-        [string]$dcName,
-        [Parameter(Mandatory=$true)]
-        [string]$machinename
-        )
-
-    $dcsecpassword = ConvertTo-SecureString $adminpassword -AsPlainText -Force
-    $dccreds = New-Object System.Management.Automation.PSCredential("$domain\$adminusername", $dcsecpassword)
-    $session = New-PSSession -ComputerName $dcName -Credential $dccreds
+    $dcsecpassword = ConvertTo-SecureString $AdminPassword -AsPlainText -Force
+    $dccreds = New-Object System.Management.Automation.PSCredential("$Domain\$AdminUsername", $dcsecpassword)
+    $session = New-PSSession -ComputerName $DCName -Credential $dccreds
     Import-PSSession -Session $session -CommandName New-ADUser, Get-ADUser, Set-ADAccountPassword
 
-    foreach($user in $usersToAdd){
+    foreach($user in $UsersToAdd){
         $username = $user['Name']
         $password = $user['Password']
         $alreadyUser = $False
@@ -410,44 +132,77 @@ function Create-AD-Users{
             $Description = "AD user"
             New-ADUser -Name $username -AccountPassword $securePassword -Description $Description -Enabled $True
 
-            $User = [ADSI]("WinNT://$domain/$username")
-            $Group = [ADSI]("WinNT://$machinename/Administrators")
+            $User = [ADSI]("WinNT://$Domain/$username")
+            $Group = [ADSI]("WinNT://$MachineName/Administrators")
             $Group.PSBase.Invoke("Add",$User.PSBase.Path)
         }
         else{
-            Juju-Log "User already addded"
+            Write-JujuLog "User already addded"
             Set-ADAccountPassword -NewPassword $securePassword -Identity $username
         }
     }
+
     $session | Remove-PSSession
 }
 
-function Change-ServiceLogon{
-    param (
+function Create-Service {
+    param(
         [Parameter(Mandatory=$true)]
-        $services,
+        [string]$Name,
         [Parameter(Mandatory=$true)]
-        [string]$userName,
+        [string]$Path,
+        [Parameter(Mandatory=$true)]
+        [string]$Description,
         [Parameter(Mandatory=$false)]
-        $password
-        )
+        [string]$User,
+        [Parameter(Mandatory=$false)]
+        [string]$Pass
+    )
 
-    $services | ForEach-Object { $_.Change($null,$null,$null,$null,$null,$null,$userName,$password) }
+    if($user -and $Pass){
+        $secpasswd = ConvertTo-SecureString $Pass -AsPlainText -Force
+        $cred = New-Object System.Management.Automation.PSCredential ($User, $secpasswd)
+    }
+
+    if ($cred){
+        New-Service -Name $Name -BinaryPathName $Path -DisplayName $Name -Description $Description  -Credential $cred -Confirm:$false
+    }else{
+        New-Service -Name $Name -BinaryPathName $Path -DisplayName $Name -Description $Description -Confirm:$false
+    }
+
 }
 
-function Get-Subnet{
-    param (
+function Change-ServiceLogon {
+    param(
         [Parameter(Mandatory=$true)]
-        $ip,
+        $Services,
         [Parameter(Mandatory=$true)]
-        $netmask
-        )
+        [string]$UserName,
+        [Parameter(Mandatory=$false)]
+        $Password
+    )
+
+    if($Services.GetType() -eq [System.Array]){
+        $Services | ForEach-Object { $_.Change($null,$null,$null,$null,$null,$null,$UserName,$Password) }
+    } else {
+        $Services.Change($null,$null,$null,$null,$null,$null,$UserName,$Password)
+    }
+}
+
+function Get-Subnet {
+    param(
+        [Parameter(Mandatory=$true)]
+        $IP,
+        [Parameter(Mandatory=$true)]
+        $Netmask
+    )
+
     $class = 32
     $netmaskClassDelimiter = "255"
-    $netmaskSplit = $netmask -split "[.]"
-    $ipSplit = $ip -split "[.]"
-    for($i = 0; $i -lt 4; $i++){
-        if($netmaskSplit[$i] -ne $netmaskClassDelimiter){
+    $netmaskSplit = $Netmask -split "[.]"
+    $ipSplit = $IP -split "[.]"
+    for ($i = 0; $i -lt 4; $i++) {
+        if ($netmaskSplit[$i] -ne $netmaskClassDelimiter) {
             $class -= 8
             $ipSplit[$i] = "0"
         }
@@ -457,13 +212,314 @@ function Get-Subnet{
     return $fullSubnet
 }
 
-function New-NetstatObject {
+function Install-WindowsFeatures {
+    param(
+        [Parameter(Mandatory=$true)]
+        [array]$Features
+    )
+
+    $rebootNeeded = $false
+    foreach ($feature in $Features) {
+        $state = ExecuteWith-Retry -Command {
+            Install-WindowsFeature -Name $feature -ErrorAction Stop
+        }
+        if ($state.Success -eq $true) {
+            if ($state.RestartNeeded -eq 'Yes') {
+                $rebootNeeded = $true
+            }
+        } else {
+            throw "Install failed for feature $feature"
+        }
+    }
+
+    if ($rebootNeeded -eq $true) {
+        ExitFrom-JujuHook -WithReboot
+    }
+}
+
+function Get-CharmStateKeyPath () {
+    return "HKLM:\SOFTWARE\Wow6432Node\Cloudbase Solutions"
+}
+
+function Set-CharmState {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$CharmName,
+        [Parameter(Mandatory=$true)]
+        [string]$Key,
+        [Parameter(Mandatory=$true)]
+        [string]$Val
+    )
+
+    $keyPath = Get-CharmStateKeyPath
+    $fullKey = ($CharmName + $Key)
+    $property = New-ItemProperty -Path $keyPath `
+                                 -Name $fullKey `
+                                 -Value $Val `
+                                 -PropertyType String `
+                                 -ErrorAction SilentlyContinue
+
+    if ($property -eq $null) {
+        Set-ItemProperty -Path $keyPath -Name $fullKey -Value $Val
+    }
+}
+
+function Get-CharmState {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$CharmName,
+        [Parameter(Mandatory=$true)]
+        [string]$Key
+    )
+
+    $keyPath = Get-CharmStateKeyPath
+    $fullKey = ($CharmName + $Key)
+    $property = Get-ItemProperty -Path $keyPath `
+                                 -Name $fullKey `
+                                 -ErrorAction SilentlyContinue
+
+    if ($property -ne $null) {
+        $state = Select-Object -InputObject $property -ExpandProperty $fullKey
+        return $state
+    } else {
+        return $null
+    }
+}
+
+function Check-Membership {
+    Param (
+        [Parameter(Mandatory=$true)]
+        [string]$User,
+        [Parameter(Mandatory=$true)]
+        [string]$GroupSID
+    )
+	Juju-Log ">>>>>>>>>>>> $GroupSID"
+    $group = Get-CimInstance -ClassName Win32_Group  -Filter "SID = '$GroupSID'"
+	Juju-Log "Checking for $User"
+    $ret = Get-CimAssociatedInstance -InputObject $group -ResultClassName Win32_UserAccount | Where-Object {$_.Caption -eq $User }
+	Juju-Log ">>>>>Found $ret"
+    return $ret
+}
+
+function Convert-SIDToFriendlyName {
     Param(
+        [Parameter(Mandatory=$true)]
+        [string]$SID
+    )
+    $objSID = New-Object System.Security.Principal.SecurityIdentifier($SID)
+    $objUser = $objSID.Translate( [System.Security.Principal.NTAccount])
+    $name = $objUser.Value
+	$n = $name.Split("\")
+	if ($n.length -gt 1){
+		return $n[1]
+	}
+    return $n[0]
+}
+
+
+function Normalize-User {
+   Param(
+    [Parameter(Mandatory=$true)]
+    [string]$User
+   )
+
+   $splitUser = $User.Split("\")
+    if ($splitUser.length -eq 2){
+        if ($splitUser[0] -eq "."){
+            $domain = $env:COMPUTERNAME
+        } else {
+            $domain = $splitUser[0]
+        }
+        $u = $splitUser[1]
+    }else{
+        $domain = $env:COMPUTERNAME
+        $u = $User
+    }
+    return @($domain, $u)
+}
+
+function AddTo-LocalGroup {
+    Param (
+        [Parameter(Mandatory=$true)]
+        [string]$Username,
+        [Parameter(Mandatory=$true)]
+        [string]$GroupSID
+    )
+
+    $usrSplit = Normalize-User -User $Username
+    $domain = $usrSplit[0]
+    $user = $usrSplit[1]
+    $domuser = "$domain\$user"
+	Juju-Log "><><><>>>!!!11111 $domuser"
+    $isMember = Check-Membership -User $domuser -Group $GroupSID
+	Juju-Log "><><><>>>!!!22222222"
+    $grpName = Convert-SIDToFriendlyName -SID $GroupSID
+	Juju-Log ">>>>>>Got Group $grpName"
+    if (!$isMember){
+        $ObjUser = [ADSI]("WinNT://$domain/$user")
+        $objGroup = [ADSI]("WinNT://$env:COMPUTERNAME/$grpName")
+		try {
+			$objGroup.PSBase.Invoke("Add",$objUser.PSBase.Path)
+		} catch {
+			Juju-Log "Ignoring error"
+		}
+    }
+
+    return $true
+}
+
+function Create-LocalAdmin {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$LocalAdminUsername,
+        [Parameter(Mandatory=$true)]
+        [string]$LocalAdminPassword
+    )
+
+    $existentUser = Get-WmiObject -Class Win32_Account `
+                                  -Filter "Name = '$LocalAdminUsername'"
+    if ($existentUser -eq $null) {
+        $computer = [ADSI]"WinNT://$env:computername"
+        $localAdmin = $computer.Create("User", $LocalAdminUsername)
+        $localAdmin.SetPassword($LocalAdminPassword)
+        $localAdmin.SetInfo()
+        $LocalAdmin.FullName = $LocalAdminUsername
+        $LocalAdmin.SetInfo()
+        # UserFlags = Logon script | Normal user | No pass expiration
+        $LocalAdmin.UserFlags = 1 + 512 + 65536
+        $LocalAdmin.SetInfo()
+    } else {
+        Execute-ExternalCommand -Command {
+            net.exe user $LocalAdminUsername $LocalAdminPassword
+        } -ErrorMessage "Failed to create new user"
+    }
+
+    AddTo-LocalGroup -Username $LocalAdminUsername -GroupSID "S-1-5-32-544"
+}
+
+function Get-DomainName {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$FQDN
+    )
+
+    $fqdnParts = $FQDN.split(".")
+    $domainNameParts = $fqdnParts[0..($fqdnParts.Length - 2)]
+    $domainName = $domainNameParts -join '.'
+
+    return $domainName
+}
+
+function Get-ADCredential {
+    param(
+        [Parameter(Mandatory=$true)]
+        $ADParams
+    )
+
+    $adminUsername = $ADParams["ad_username"]
+    $adminPassword = $ADParams["ad_password"]
+    $domain = Get-DomainName $ADParams["ad_domain"]
+    $passwordSecure = ConvertTo-SecureString $adminPassword -AsPlainText -Force
+    $adCredential = New-Object PSCredential("$domain\$adminUsername",
+                                             $passwordSecure)
+
+    return $adCredential
+}
+
+function Set-DNS {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Interface,
+        [Parameter(Mandatory=$true)]
+        [array]$DNSIPs
+    )
+
+    Set-DnsClientServerAddress -InterfaceAlias $Interface `
+                               -ServerAddresses $DNSIPs
+}
+
+function Get-NetAdapterName {
+    param(
+        [switch]$Primary
+    )
+
+    $primaryEthernetNames = @(
+        "Management0",
+        "Ethernet0"
+    )
+
+    $netAdapters = Get-NetAdapter
+    foreach ($adapter in $netAdapters) {
+        if ($Primary -eq $true) {
+            if ($primaryEthernetNames -match $adapter.Name) {
+                return $adapter.Name
+            }
+        } else {
+            if ($primaryEthernetNames -notmatch $adapter.Name) {
+                return $adapter.Name
+            }
+        }
+    }
+
+    return $null
+}
+
+function Get-PrimaryNetAdapterName {
+    return (Get-NetAdapterName)
+}
+
+function Get-SecondaryNetAdapterName {
+    return (Get-NetAdapterName -Primary)
+}
+
+function Join-Domain {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$FQDN,
+        [Parameter(Mandatory=$true)]
+        [string]$DomainCtrlIP,
+        [Parameter(Mandatory=$true)]
+        $LocalCredential,
+        [Parameter(Mandatory=$true)]
+        $ADCredential
+    )
+
+    $netAdapterName = Get-PrimaryNetAdapterName
+    if ($netAdapterName -eq $null) {
+        $netAdapterName = Get-SecondaryNetAdapterName
+    }
+    Set-DNS $netAdapterName $DomainCtrlIP
+
+    $domainName = Get-DomainName $FQDN
+    Add-Computer -LocalCredential $LocalCredential `
+                 -Credential $ADCredential `
+                 -Domain $domainName
+}
+
+function Is-InDomain {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$WantedDomain
+    )
+
+    $currentDomain = (Get-WmiObject -Class `
+                          Win32_ComputerSystem).Domain.ToLower()
+    $comparedDomain = ($WantedDomain).ToLower()
+    $inDomain = $currentDomain.Equals($comparedDomain)
+
+    return $inDomain
+}
+
+function New-NetstatObject {
+    param(
         [Parameter(Mandatory=$True)]
         $Properties
     )
-    
-    $process = New-Object psobject -property @{
+
+    $process = Get-Process | Where-Object { $_.Id -eq $Properties.PID }
+    $processName = $process.ProcessName
+
+    $processObject = New-Object psobject -property @{
         Protocol      = $Properties.Protocol
         LocalAddress  = $Properties.LAddress
         LocalPort     = $Properties.LPort
@@ -471,34 +527,33 @@ function New-NetstatObject {
         RemotePort    = $Properties.RPort
         State         = $Properties.State
         ID            = [int]$Properties.PID
-        ProcessName   = ( $ps | Where-Object {$_.Id -eq $Properties.PID} ).ProcessName
+        ProcessName   = $processName
     }
 
-    return $process
+    return $processObject
 }
 
-# It works only for netstat -ano
+# It works only for command: netstat -ano
 function Get-NetstatObjects {
-    $null, $null, $null, $null, $netstat = netstat -ano
-    $ps = Get-Process
+    $null, $null, $null, $null,
+    $netstatOutput = Execute-ExternalCommand -Command {
+        netstat -ano
+    } -ErrorMessage "Failed to execute netstat"
 
-    [regex]$regexTCP = '(?<Protocol>\S+)\s+(?<LAddress>\S+):(?<LPort>\S+)\s+(?<RAddress>\S+):(?<RPort>\S+)\s+(?<State>\S+)\s+(?<PID>\S+)'
-    [regex]$regexUDP = '(?<Protocol>\S+)\s+(?<LAddress>\S+):(?<LPort>\S+)\s+(?<RAddress>\S+):(?<RPort>\S+)\s+(?<PID>\S+)'
-
+    [regex]$regexTCP = '(?<Protocol>\S+)\s+(?<LAddress>\S+):(?<LPort>\S+)' +
+            '\s+(?<RAddress>\S+):(?<RPort>\S+)\s+(?<State>\S+)\s+(?<PID>\S+)'
+    [regex]$regexUDP = '(?<Protocol>\S+)\s+(?<LAddress>\S+):(?<LPort>\S+)' +
+                       '\s+(?<RAddress>\S+):(?<RPort>\S+)\s+(?<PID>\S+)'
     $objects = @()
 
-    foreach ($line in $netstat)
-    {
-        switch -regex ($line.Trim())
-        {
-            $regexTCP
-            {
+    foreach ($line in $netstatOutput) {
+        switch -regex ($line.Trim()) {
+            $regexTCP {
                 $process = New-NetstatObject -Properties $matches
                 $objects = $objects + $process
                 continue
             }
-            $regexUDP
-            {
+            $regexUDP {
                 $process = New-NetstatObject -Properties $matches
                 $objects = $objects + $process
                 continue
@@ -507,6 +562,152 @@ function Get-NetstatObjects {
     }
 
     return $objects
+}
+
+function Add-WindowsUser {
+    param(
+        [parameter(Mandatory=$true)]
+        [string]$Username,
+        [parameter(Mandatory=$true)]
+        [string]$Password
+    )
+
+    Execute-ExternalCommand -Command {
+        NET.EXE USER $Username $Password '/ADD'
+    } -ErrorMessage "Failed to create new user"
+}
+
+function Delete-WindowsUser {
+    param(
+        [parameter(Mandatory=$true)]
+        [string]$Username
+    )
+
+    Execute-ExternalCommand -Command {
+        NET.EXE USER $Username '/DELETE'
+    } -ErrorMessage "Failed to create new user"
+}
+
+
+# ALIASES
+
+function Get-Domain-Name {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$FullDomainName
+    )
+
+    return (Get-DomainName $FullDomainName)
+}
+
+function Create-Local-Admin {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$LocalAdminUsername,
+        [Parameter(Mandatory=$true)]
+        [string]$LocalAdminPassword
+    )
+
+    Create-LocalAdmin $LocalAdminUsername $LocalAdminPassword
+}
+
+function Get-Ad-Credential {
+    param(
+        [Parameter(Mandatory=$true)]
+        $params
+    )
+
+    return (Get-ADCredential $params)
+}
+
+function Join-Any-Domain {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$domain,
+        [Parameter(Mandatory=$true)]
+        [string]$domainCtrlIp,
+        [Parameter(Mandatory=$true)]
+        $localCredential,
+        [Parameter(Mandatory=$true)]
+        $adCredential
+    )
+
+    Join-Domain $domain $domainCtrlIp $localCredential $adCredential
+}
+
+function Is-Component-Installed {
+    param(
+        [Parameter(Mandatory=$true)]
+        [string]$Name
+    )
+
+    return (Is-ComponentInstalled $Name)
+}
+
+function Start-Process-Redirect {
+    param(
+        [Parameter(Mandatory=$true)]
+        [array]$Filename,
+        [Parameter(Mandatory=$true)]
+        [array]$Arguments,
+        [Parameter(Mandatory=$false)]
+        [array]$Domain,
+        [Parameter(Mandatory=$false)]
+        [array]$Username,
+        [Parameter(Mandatory=$false)]
+        $SecPassword
+    )
+
+    return (Start-ProcessRedirect $FileName `
+                                   $Arguments `
+                                   $Domain `
+                                   $Username `
+                                   $SecPassword)
+}
+
+function Create-AD-Users {
+    param(
+        [Parameter(Mandatory=$true)]
+        $UsersToAdd,
+        [Parameter(Mandatory=$true)]
+        [string]$AdminUsername,
+        [Parameter(Mandatory=$true)]
+        $AdminPassword,
+        [Parameter(Mandatory=$true)]
+        [string]$Domain,
+        [Parameter(Mandatory=$true)]
+        [string]$DCName,
+        [Parameter(Mandatory=$true)]
+        [string]$MachineName
+    )
+
+    Create-ADUsers $UsersToAdd `
+                   $AdminUsername `
+                   $AdminPassword `
+                   $Domain `
+                   $DCName `
+                   $MachineName
+}
+
+function Encrypt-String {
+    Param (
+        [Parameter(Mandatory=$true)]
+        [string]$content
+    )
+    $ret = ConvertTo-SecureString -AsPlainText -Force $content | ConvertFrom-SecureString
+    return $ret
+}
+
+function Decrypt-String {
+    Param (
+        [Parameter(Mandatory=$true)]
+        [string]$content
+    )
+    $c = ConvertTo-SecureString $content
+    $dec = [System.Runtime.InteropServices.Marshal]::SecureStringToCoTaskMemUnicode($c)
+    $ret = [System.Runtime.InteropServices.Marshal]::PtrToStringUni($dec)
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeCoTaskMemUnicode($dec)
+    return $ret
 }
 
 Export-ModuleMember -Function *

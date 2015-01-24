@@ -11,6 +11,10 @@ options:
     description: |
       overwrite default installer location. Take care to set correct openstack-origin
       as that will be used by the charm to pick the correct config templates.
+  ovs-installer-url:
+    type: string
+    description: |
+      Location of the OVS MSI installer
   rabbit-user:
     default: nova
     type: string
@@ -41,6 +45,23 @@ options:
       In cases where there is only one interface on the system, the vmswitch will be created using that
       interface and OSManagement will be set to True, regardless of the vmswitch-management option.
       Avoid using the management interface as a data interface where system has more then one NIC.
+  data-port-vlan:
+    default: 8
+    type: int
+    description: |
+      VLAN over which tunnels should be made
+  bond-ports:
+    type: string
+    description: |
+      MAC addresses of ports participating in bond link
+  network-type:
+    type: string
+    default: hyperv
+    description: |
+      Neutron agent to use. Valid options are:
+        * hyperv
+        * ovs
+      Default is hyperv
   vmswitch-name:
     default: br100
     type: string
@@ -60,3 +81,12 @@ options:
     type: string
     decription: |
       Location in which to store VM disks
+  install-local-packages:
+    default: False
+    type: boolean
+    description: |
+      This is a hack. It tells the charm to install nova and neutron from local tar archive
+  local-ip-pool:
+    type: string
+    description: |
+      Use this for local Ip range
